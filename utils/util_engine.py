@@ -1,53 +1,39 @@
-# util_engine.py
-import os 
+# utils/util_engine.py
+import os
 import torch
 from loguru import logger
 from torchinfo import summary as summary_
 from ptflops import get_model_complexity_info
 from thop import profile
 import numpy as np
-import torch
-import wandb
 
-def load_last_checkpoint_n_get_epoch(checkpoint_dir, model, optimizer, location):
+def load_last_checkpoint_n_get_epoch(
+    checkpoint_dir, model, optimizer, location='cpu'
+):
     """
-    Load the latest checkpoint (model state and optimizer state) from a given directory.
-
-    Args:
-        checkpoint_dir (str): Directory containing the checkpoint files.
-        model (torch.nn.Module): The model into which the checkpoint's model state should be loaded.
-        optimizer (torch.optim.Optimizer): The optimizer into which the checkpoint's optimizer state should be loaded.
-        location (str, optional): Device location for loading the checkpoint. Defaults to 'cpu'.
-
-    Returns:
-        int: The epoch number associated with the loaded checkpoint. 
-             If no checkpoint is found, returns 1 as the starting epoch.
-
-    Notes:
-        - The checkpoint file is expected to have keys: 'model_state_dict', 'optimizer_state_dict', and 'epoch'.
-        - If there are multiple checkpoint files in the directory, the one with the highest epoch number is loaded.
+    Load the latest checkpoint from a directory.
+    Returns the next epoch to start from.
     """
     checkpoint_files = [f for f in os.listdir(checkpoint_dir)]
-
     if not checkpoint_files:
         return 1
-    else:
-        epochs = [int(f.split('.')[1]) for f in checkpoint_files]
-        latest_checkpoint_file = os.path.join(
-            checkpoint_dir,
-            checkpoint_files[epochs.index(max(epochs))]
-        )
 
-        logger.info(f"Loaded Pretrained model from {latest_checkpoint_file} .....")
-        checkpoint_dict = torch.load(latest_checkpoint_file, map_location=location)
-        model.load_state_dict(checkpoint_dict['model_state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
-        return checkpoint_dict['epoch'] + 1
+    epochs = [int(f.split('.')[1]) for f in checkpoint_files]
+    latest = checkpoint_files[epochs.index(max(epochs))]
+    latest_path = os.path.join(checkpoint_dir, latest)
 
-def save_checkpoint_per_nth(nth, epoch, model, optimizer, train_loss, valid_loss, checkpoint_path, wandb_run):
+    logger.info(f"Loaded Pretrained model from {latest_path} .....")
+    ckpt = torch.load(latest_path, map_location=location)
+    model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    return ckpt['epoch'] + 1
+
+def save_checkpoint_per_nth(
+    nth, epoch, model, optimizer,
+    train_loss, valid_loss, checkpoint_path
+):
     """
-    Save the state of the model and optimizer every nth epoch to a checkpoint file.
-    Additionally, log and save the checkpoint file using wandb.
+    Save model/optimizer state every `nth` epoch.
     """
     if epoch % nth == 0:
         torch.save(
@@ -60,12 +46,14 @@ def save_checkpoint_per_nth(nth, epoch, model, optimizer, train_loss, valid_loss
             },
             os.path.join(checkpoint_path, f"epoch.{epoch:04}.pth")
         )
-        wandb_run.save(os.path.join(checkpoint_path, f"epoch.{epoch:04}.pth"))
 
-def save_checkpoint_per_best(best, valid_loss, train_loss, epoch, model, optimizer, checkpoint_path, wandb_run=None):
+def save_checkpoint_per_best(
+    best, valid_loss, train_loss,
+    epoch, model, optimizer, checkpoint_path
+):
     """
-    Save the state of the model and optimizer when validation loss improves.
-    Optionally log and save the checkpoint file using wandb if a run is provided.
+    Save model when validation loss improves.
+    Returns the updated best-valid-loss.
     """
     if valid_loss < best:
         torch.save(
@@ -78,8 +66,6 @@ def save_checkpoint_per_best(best, valid_loss, train_loss, epoch, model, optimiz
             },
             os.path.join(checkpoint_path, f"epoch.{epoch:04}.pth")
         )
-        if wandb_run is not None:
-            wandb_run.save(os.path.join(checkpoint_path, f"epoch.{epoch:04}.pth"))
         best = valid_loss
     return best
 
@@ -96,23 +82,23 @@ def step_scheduler(scheduler, **kwargs):
 def print_parameters_count(model):
     total_parameters = 0
     for name, param in model.named_parameters():
-        param_count = param.numel()
-        total_parameters += param_count
-        logger.info(f"{name}: {param_count}")
+        count = param.numel()
+        total_parameters += count
+        logger.info(f"{name}: {count}")
     logger.info(f"Total parameters: {(total_parameters / 1e6):.2f}M")
 
 def model_params_mac_summary(model, input, dummy_input, metrics):
-    # ptflpos
+    # ptflops
     if 'ptflops' in metrics:
-        MACs_ptflops, params_ptflops = get_model_complexity_info(
+        macs, params = get_model_complexity_info(
             model,
             (input.shape[1],),
             print_per_layer_stat=False,
             verbose=False
         )
-        MACs_ptflops = MACs_ptflops.replace(" MMac", "")
-        params_ptflops = params_ptflops.replace(" M", "")
-        logger.info(f"ptflops: MACs: {MACs_ptflops}, Params: {params_ptflops}")
+        macs = macs.replace(" MMac", "")
+        params = params.replace(" M", "")
+        logger.info(f"ptflops: MACs: {macs}, Params: {params}")
 
     # thop
     if 'thop' in metrics:
@@ -122,7 +108,7 @@ def model_params_mac_summary(model, input, dummy_input, metrics):
 
     # torchinfo
     if 'torchinfo' in metrics:
-        model_profile = summary_(model, input_size=input.size(), verbose=0)
-        MACs_torchinfo = model_profile.total_mult_adds / 1e6
-        params_torchinfo = model_profile.total_params / 1e6
+        profile_ = summary_(model, input_size=input.size(), verbose=0)
+        MACs_torchinfo = profile_.total_mult_adds / 1e6
+        params_torchinfo = profile_.total_params / 1e6
         logger.info(f"torchinfo: MACs: {MACs_torchinfo} GMac, Params: {params_torchinfo}")
